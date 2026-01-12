@@ -31,7 +31,64 @@ import warnings
 # SOURCES RUST
 # ============================================================
 
-RUST_SOURCE = """
+# Version Rust SANS Rayon (pour fallback rustc)
+RUST_SOURCE_SIMPLE = """
+use std::slice;
+
+#[no_mangle]
+pub extern "C" fn nexus_step(
+    states: *mut f32,
+    velocities: *mut f32,
+    frozen: *mut u8,
+    neighbors: *const i32,
+    neighbor_counts: *const i32,
+    n_entities: usize,
+    momentum: f32,
+    force_strength: f32
+) {
+    let states = unsafe { slice::from_raw_parts_mut(states, n_entities) };
+    let velocities = unsafe { slice::from_raw_parts_mut(velocities, n_entities) };
+    let frozen = unsafe { slice::from_raw_parts_mut(frozen, n_entities) };
+    
+    let mut offset = 0;
+    for i in 0..n_entities {
+        if frozen[i] == 1 {
+            offset += unsafe { *neighbor_counts.add(i) as usize };
+            continue;
+        }
+        
+        let n_neigh = unsafe { *neighbor_counts.add(i) as usize };
+        let neigh_slice = unsafe { slice::from_raw_parts(neighbors.add(offset), n_neigh) };
+        
+        let mut force = 0.0f32;
+        for &j in neigh_slice {
+            let j = j as usize;
+            if j < n_entities {
+                force += (states[j] - states[i]) * force_strength;
+            }
+        }
+        
+        if n_neigh > 0 {
+            force /= n_neigh as f32;
+        }
+        
+        velocities[i] = momentum * velocities[i] + (1.0 - momentum) * force;
+        states[i] += velocities[i];
+        
+        offset += n_neigh;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nexus_variance(states: *const f32, n: usize) -> f32 {
+    let states = unsafe { slice::from_raw_parts(states, n) };
+    let mean: f32 = states.iter().sum::<f32>() / n as f32;
+    states.iter().map(|s| (s - mean).powi(2)).sum::<f32>() / n as f32
+}
+"""
+
+# Version Rust AVEC Rayon (pour Cargo)
+RUST_SOURCE_RAYON = """
 use std::slice;
 use rayon::prelude::*;
 
@@ -50,14 +107,14 @@ pub extern "C" fn nexus_step(
     let velocities = unsafe { slice::from_raw_parts_mut(velocities, n_entities) };
     let frozen = unsafe { slice::from_raw_parts_mut(frozen, n_entities) };
     
-    // Calcul des forces en parallèle avec Rayon
+    // Calcul parallèle avec Rayon
     let forces: Vec<f32> = (0..n_entities).into_par_iter().map(|i| {
         if frozen[i] == 1 {
             return 0.0;
         }
         
-        let n_neigh = unsafe { *neighbor_counts.add(i) as usize };
         let offset: usize = (0..i).map(|j| unsafe { *neighbor_counts.add(j) as usize }).sum();
+        let n_neigh = unsafe { *neighbor_counts.add(i) as usize };
         let neigh_slice = unsafe { slice::from_raw_parts(neighbors.add(offset), n_neigh) };
         
         let mut force = 0.0f32;
@@ -75,7 +132,6 @@ pub extern "C" fn nexus_step(
         }
     }).collect();
     
-    // Application des forces (séquentiel pour éviter race conditions)
     for i in 0..n_entities {
         if frozen[i] == 0 {
             velocities[i] = momentum * velocities[i] + (1.0 - momentum) * forces[i];
@@ -221,14 +277,15 @@ class CompilerManager:
             self.rust_lib = ctypes.CDLL(str(self.cache_dir / f"{lib_name}.so"))
             return self.rust_lib
         
-        print(f"🦀 Compilation Rust (avec Rayon)...")
+        print(f"🦀 Compilation Rust...")
         
-        rs_file = self.cache_dir / f"{lib_name}.rs"
-        rs_file.write_text(source)
-        
-        # Cargo.toml pour Rayon
-        cargo_toml = self.cache_dir / "Cargo.toml"
-        cargo_toml.write_text("""
+        # Tentative 1: Cargo avec Rayon
+        try:
+            rs_file = self.cache_dir / f"{lib_name}.rs"
+            rs_file.write_text(RUST_SOURCE_RAYON)
+            
+            cargo_toml = self.cache_dir / "Cargo.toml"
+            cargo_toml.write_text("""
 [package]
 name = "nexus_rust"
 version = "0.1.0"
@@ -241,16 +298,30 @@ rayon = "1.8"
 crate-type = ["cdylib"]
 path = "nexus_rust.rs"
 """)
-        
-        # Compilation avec Cargo
-        result = subprocess.run([
-            "cargo", "build", "--release",
-            "--manifest-path", str(cargo_toml)
-        ], capture_output=True, text=True, cwd=str(self.cache_dir))
-        
-        if result.returncode != 0:
-            # Fallback: compilation sans Rayon si cargo pas dispo
-            print("⚠️  Cargo non disponible, compilation rustc simple...")
+            
+            result = subprocess.run([
+                "cargo", "build", "--release",
+                "--manifest-path", str(cargo_toml)
+            ], capture_output=True, text=True, cwd=str(self.cache_dir))
+            
+            if result.returncode == 0:
+                import shutil
+                lib_path = self.cache_dir / "target" / "release" / f"lib{lib_name}.so"
+                if lib_path.exists():
+                    shutil.copy(lib_path, self.cache_dir / f"{lib_name}.so")
+                    print("✅ Rust OK (Rayon multi-threading)")
+                else:
+                    raise FileNotFoundError("Lib not found in target/release")
+            else:
+                raise RuntimeError("Cargo build failed")
+                
+        except Exception as cargo_error:
+            # Fallback: rustc sans Rayon
+            print("⚠️  Cargo indisponible, fallback rustc sans Rayon...")
+            
+            rs_file = self.cache_dir / f"{lib_name}.rs"
+            rs_file.write_text(RUST_SOURCE_SIMPLE)
+            
             result = subprocess.run([
                 "rustc", "--crate-type=cdylib", "-C", "opt-level=3",
                 str(rs_file), "-o", str(self.cache_dir / f"{lib_name}.so")
@@ -258,18 +329,13 @@ path = "nexus_rust.rs"
             
             if result.returncode != 0:
                 raise RuntimeError(f"Erreur Rust:\n{result.stderr}")
-        else:
-            # Copie depuis target/release
-            import shutil
-            lib_path = self.cache_dir / "target" / "release" / f"lib{lib_name}.so"
-            if lib_path.exists():
-                shutil.copy(lib_path, self.cache_dir / f"{lib_name}.so")
+            
+            print("✅ Rust OK (mono-thread)")
         
         hash_file = self.cache_dir / f"{lib_name}.hash"
         hash_file.write_text(self._hash_source(source))
         
         self.rust_lib = ctypes.CDLL(str(self.cache_dir / f"{lib_name}.so"))
-        print("✅ Rust OK")
         return self.rust_lib
     
     def compile_cpp(self, source: str, lib_name: str = "nexus_cpp"):
@@ -481,7 +547,7 @@ class System:
         self._bootstrap()
     
     def _bootstrap(self):
-        rust_lib = self.compiler.compile_rust(RUST_SOURCE)
+        rust_lib = self.compiler.compile_rust(RUST_SOURCE_SIMPLE)
         
         rust_lib.nexus_step.argtypes = [
             ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float),
