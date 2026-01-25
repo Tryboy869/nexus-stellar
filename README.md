@@ -1,9 +1,13 @@
 # NEXUS-STELLAR
 
-**Moteur de calcul émergent polyglotte auto-compilant**
+<div align="center">
+  <img src="logo.jpg" alt="Nexus-Stellar Logo" width="600"/>
+  
+  **Moteur de calcul émergent polyglotte auto-compilant**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+  [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+</div>
 
 ---
 
