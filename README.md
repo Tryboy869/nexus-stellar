@@ -1,7 +1,7 @@
 # NEXUS-STELLAR
 
 <div align="center">
-  <img src="logo.jpg" alt="Nexus-Stellar Logo" width="600"/>
+  <img src="logo.png" alt="Nexus-Stellar Logo" width="600"/>
   
   **Moteur de calcul émergent polyglotte auto-compilant**
 
